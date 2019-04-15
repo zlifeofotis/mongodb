@@ -1,0 +1,247 @@
+
+
+构建一个mongoDB Sharding Cluster需要三种角色:shard 服务器(Shard Server)、配置服务器(config Server)、路由进程(Route Process):
+Shard服务器:
+　　shard服务器即存储实际数据的分片,每个shard可以是一个mongod实例, 也可以是一组mongod实例构成的Replica Sets.为了实现每个Shard内部的故障自动转换,MongoDB 官方建议每个shard为一组Replica Sets.
+配置服务器:
+　　为了将一个特定的collection存储在多个shard中,需要为该collection指定一个shard key,决定该条记录属于哪个chunk,配置服务器可以存储以下信息, 每个shard节点的配置信息,每个chunk的shard key范围,chunk在各shard的分布情况,集群中所有DB和collection的sharding配置信息。
+路由进程:
+　　它是一个前段路由,客户端由此接入,首先询问配置服务器需要到哪个shard上查询或保存记录,然后连接相应的shard执行操作,最后将结果返回给客户端,客户端只需要将原本发给 mongod的查询或更新请求原封不动地发给路由进程,而不必关心所操作的记录存储在哪个shard上。
+
+-------------------------------------------------------------------------------------------------------------------
+
+Shard服务器:使用Replica Sets确保每个数据节点都具有备份、自动容错转移、自动恢复的能力
+配置服务器:使用多个配置服务器确保元数据完整性、自动容错
+路由进程:使用多个路由进程实现平衡,提高客户端接入性能、自动容错
+
+
+-------------------------------------------------------------------------------------------------------------------
+
+配置文件参数说明:
+
+dbpath:数据存放目录
+logpath:日志存放路径
+logappend:以追加的方式记录日志
+replSet:replica set的名字
+port:mongodb进程所使用的端口号,默认为27017
+fork:以后台方式运行进程
+journal:写日志
+smallfiles:当提示空间不够时添加此参数
+pidfilepath:进程文件,方便停止mongodb
+directoryperdb:为每一个数据库按照数据库名建立文件夹存放
+bind_ip:mongodb所绑定的ip地址
+oplogSize:mongodb操作日志文件的最大大小,单位为Mb,默认为硬盘剩余空间的5%
+noprealloc:不预先分配存储
+shardsvr:分片
+configsvr:配置服务节点
+configdb:配置config节点到route节点 
+
+-------------------------------------------------------------------------------------------------------------------
+
+mkdir -p /data/mongos/{conf,log}
+mkdir -p /data/{config,shard1,shard2,shard3}/{data,conf,log}
+
+-------------------------------------------------------------------------------------------------------------------
+
+配置Shard服务器
+
+mongod.conf:
+
+dbpath = /data/shard1/data
+pidfilepath = /data/shard1/log/mongod.pid
+logpath = /data/shard1/log/mongod.log
+logappend = true
+
+bind_ip = 127.0.0.1,192.168.0.131
+port = 20003
+fork = true
+maxConns = 500
+journal = true
+shardsvr = true
+replSet = dgshard1
+oplogSize =  1024
+
+
+
+
+config = {
+    _id : "dgshard1",
+     members : [
+        {_id : 0, host : "192.168.0.131:20003" },
+        {_id : 1, host : "192.168.0.132:20003" },
+        {_id : 2, host : "192.168.0.234:20003" , arbiterOnly: true},
+	]
+}
+
+config = {
+    _id : "dgshard2",
+     members : [
+        {_id : 0, host : "192.168.0.131:20004" },
+        {_id : 1, host : "192.168.0.132:20004" , arbiterOnly: true},
+        {_id : 2, host : "192.168.0.234:20004" },
+	]
+}
+
+
+config = {
+    _id : "dgshard3",
+     members : [
+        {_id : 0, host : "192.168.0.131:20005" , arbiterOnly: true},
+        {_id : 1, host : "192.168.0.132:20005" },
+        {_id : 2, host : "192.168.0.234:20005" },
+	]
+}
+
+ mongod -f /data/shard1/conf/mongod.conf
+ mongod -f /data/shard2/conf/mongod.conf
+ mongod -f /data/shard3/conf/mongod.conf
+
+登陆任意一台Shard服务器，初始化所有副本集:
+
+mongo 127.0.0.1:20003
+#初始化副本集配置
+>rs.initiate(config)
+#查看分区状态
+>rs.status()
+
+mongo 127.0.0.1:20004
+#初始化副本集配置
+>rs.initiate(config)
+#查看分区状态
+>rs.status()
+
+mongo 127.0.0.1:20005
+#初始化副本集配置
+>rs.initiate(config)
+#查看分区状态
+>rs.status()
+
+-------------------------------------------------------------------------------------------------------------------
+
+配置配置服务器
+
+mongod.conf:
+
+pidfilepath = /data/config/log/mongod.pid
+dbpath = /data/config/data
+logpath = /data/config/log/mongod.log
+logappend = true
+
+bind_ip = 127.0.0.1,192.168.0.131
+port = 20001
+fork = true
+configsvr = true
+replSet=configs
+maxConns=500
+journal = true
+oplogSize = 1024
+
+
+config = {
+    _id : "configs",
+     members : [
+        {_id : 0, host : "192.168.0.131:20001" },
+        {_id : 1, host : "192.168.0.132:20001" },
+        {_id : 2, host : "192.168.0.234:20001" }
+     ]
+}
+
+
+mongod -f /data/config/conf/mongod.conf
+
+登录任意一台配置服务器，初始化配置副本集:
+mongo 127.0.0.1:20001
+#初始化副本集
+>rs.initiate(config)
+#查看分区状态
+>rs.status()
+
+-------------------------------------------------------------------------------------------------------------------
+
+配置路由进程
+
+mongod.conf:
+
+pidfilepath = /data/mongos/log/mongod.pid
+logpath = /data/mongos/log/mongod.log
+logappend = true
+
+bind_ip = 127.0.0.1,192.168.0.131
+port = 20000
+fork = true
+maxConns=2000
+
+configdb = configs/192.168.0.131:20001,192.168.0.132:20001,192.168.0.234:20001
+
+
+mongos -f /data/mongos/conf/mongod.conf
+
+登陆任意一台mongos,设置分片配置，让分片生效:
+mongo 127.0.0.1:20000
+#使用admin数据库
+>use admin
+#串联路由服务与分配副本集
+>sh.addShard("dgshard1/192.168.0.131:20003,192.168.0.132:20003,192.168.0.234:20003")
+>sh.addShard("dgshard2/192.168.0.131:20004,192.168.0.132:20004,192.168.0.234:20004")
+>sh.addShard("dgshard3/192.168.0.131:20005,192.168.0.132:20005,192.168.0.234:20005")
+#查看集群状态
+>sh.status()
+
+-------------------------------------------------------------------------------------------------------------------
+
+开启分片功能：
+sh.enableSharding("库名")
+sh.shardCollection("库名.集合名",{"key":1}) 或　sh.shardCollection("库名.集合名",{"key":'hashed'})
+
+测试：
+sh.enableSharding("test")
+sh.shardCollection("test.user",{"id":'hashed'})
+
+use test
+for (var i = 1; i <= 1000000; i++){
+db.user.save({id:i,"test1":"testval1"})
+}
+db.user.stats()
+
+
+-------------------------------------------------------------------------------------------------------------------
+
+外部连接认证：
+use admin
+db.createUser({user:"root",pwd:"111111",roles:[{role:"root",db:"admin"}]})
+db.createUser({user:"admin1",pwd:"111111",roles:[{role:"clusterAdmin",db:"admin"},{role:"userAdminAnyDatabase",db:"admin"}]})
+db.createUser({user:"admin",pwd:"111111",roles:[{role:"userAdminAnyDatabase",db:"admin"}]})
+
+use foo
+db.createUser({user:"foo",pwd:"111111",roles:[{role:"read",db:"foo"}]})
+use testdb
+db.createUser({user:"testdb",pwd:"111111",roles:[{role:"readWrite",db:"testdb"}]})
+
+
+集群内部认证：
+openssl rand -base64 768 > /data/mongos/conf/keyfile
+chmod 400 /data/mongos/conf/keyfile
+
+mongos:
+keyFile = /data/mongos/conf/keyfile
+
+config:
+auth = true
+keyFile = /data/mongos/conf/keyfile
+
+shard:
+auth = true
+keyFile = /data/mongos/conf/keyfile
+
+
+重启服务：
+pkill mongos && pkill mongod
+
+mongod -f /data/shard1/conf/mongod.conf
+mongod -f /data/shard2/conf/mongod.conf
+mongod -f /data/shard3/conf/mongod.conf
+mongod -f /data/config/conf/mongod.conf
+mongos -f /data/mongos/conf/mongod.conf
+
+
+
